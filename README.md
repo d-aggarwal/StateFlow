@@ -1,5 +1,7 @@
 # StateFlow
 
+**[Available on the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=drishti-aggarwal.stateflow)**
+
 A deterministic VS Code extension that synchronizes local workspace context to browser-based LLMs via the system clipboard.
 
 ## The Problem

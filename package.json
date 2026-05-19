@@ -3,6 +3,12 @@
   "displayName": "StateFlow",
   "description": "Deterministic context synchronization between IDE and browser-based LLMs via clipboard.",
   "version": "0.0.1",
+  "publisher": "drishti-aggarwal",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/d-aggarwal/StateFlow"
+  },
+  "icon": "icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
