@@ -1,4 +1,4 @@
-import { WorkspaceSnapshot, FileEntry, DiagnosticEntry } from './types';
+import { WorkspaceSnapshot, FileEntry, DiagnosticEntry, KeyFile } from './types';
 
 /**
  * ContextNormalizer: Compiles workspace data into human-readable text blocks
@@ -13,6 +13,9 @@ import { WorkspaceSnapshot, FileEntry, DiagnosticEntry } from './types';
 /**
  * Compiles a full project primer (used on first sync).
  * Gives the receiving LLM a high-level understanding of the project.
+ *
+ * Includes: key file contents, file tree with exports, active file content,
+ * and full diagnostic messages.
  */
 export function compilePrimer(snapshot: WorkspaceSnapshot): string {
   const s: string[] = [];
@@ -22,25 +25,44 @@ export function compilePrimer(snapshot: WorkspaceSnapshot): string {
   s.push(`Synced at: ${snapshot.timestamp}`);
   s.push('');
 
+  // Key files (package.json, README) — project identity
+  if (snapshot.keyFiles.length > 0) {
+    s.push('## Project Identity');
+    for (const kf of snapshot.keyFiles) {
+      s.push(`### ${kf.relativePath}`);
+      s.push(kf.content);
+      s.push('');
+    }
+  }
+
+  // File tree with export signatures
   s.push('## Project Structure');
-  s.push(formatFileList(snapshot.files));
+  s.push(formatFileListWithExports(snapshot.files));
   s.push('');
 
   s.push('## Language Summary');
   s.push(formatLanguageSummary(snapshot.files));
   s.push('');
 
+  // Active file with full content
   if (snapshot.activeFile) {
     s.push('## Active File');
     s.push(`Path: ${snapshot.activeFile.relativePath}`);
     s.push(`Language: ${snapshot.activeFile.languageId}`);
     s.push(`Lines: ${snapshot.activeFile.lineCount}`);
+    if (snapshot.activeFile.content) {
+      s.push('');
+      s.push('--- Content ---');
+      s.push(snapshot.activeFile.content);
+      s.push('--- End Content ---');
+    }
     s.push('');
   }
 
+  // Full diagnostic messages
   if (snapshot.diagnostics.length > 0) {
     s.push('## Diagnostics');
-    s.push(formatDiagnostics(snapshot.diagnostics));
+    s.push(formatDiagnosticsWithMessages(snapshot.diagnostics));
     s.push('');
   }
 
@@ -52,7 +74,8 @@ export function compilePrimer(snapshot: WorkspaceSnapshot): string {
 
 /**
  * Compiles an incremental update (used on subsequent syncs).
- * Shows only what changed since the last sync.
+ * Shows what changed since the last sync: added, removed, and modified files.
+ * Includes active file content and full diagnostic messages.
  */
 export function compileIncremental(
   current: WorkspaceSnapshot,
@@ -66,16 +89,22 @@ export function compileIncremental(
   s.push(`Previous sync: ${previous.timestamp}`);
   s.push('');
 
-  // Diff file lists
-  const prevPaths = new Set(previous.files.map(f => f.relativePath));
+  // Diff file lists: added, removed, and modified
+  const prevFileMap = new Map(previous.files.map(f => [f.relativePath, f]));
   const currPaths = new Set(current.files.map(f => f.relativePath));
 
-  const added = current.files.filter(f => !prevPaths.has(f.relativePath));
+  const added = current.files.filter(f => !prevFileMap.has(f.relativePath));
   const removed = previous.files.filter(f => !currPaths.has(f.relativePath));
+  const modified = current.files.filter(f => {
+    const prev = prevFileMap.get(f.relativePath);
+    if (!prev) return false; // new file, not modified
+    // Detect modification by comparing mtime or size
+    return f.lastModified !== prev.lastModified || f.sizeBytes !== prev.sizeBytes;
+  });
 
   s.push('## File Changes');
-  if (added.length === 0 && removed.length === 0) {
-    s.push('No files added or removed.');
+  if (added.length === 0 && removed.length === 0 && modified.length === 0) {
+    s.push('No file changes detected.');
   } else {
     if (added.length > 0) {
       s.push('Added:');
@@ -89,9 +118,20 @@ export function compileIncremental(
         s.push(`  - ${f.relativePath} (${f.languageId})`);
       }
     }
+    if (modified.length > 0) {
+      s.push('Modified:');
+      for (const f of modified) {
+        const prev = prevFileMap.get(f.relativePath)!;
+        const sizeChange = f.sizeBytes !== prev.sizeBytes
+          ? ` (${formatSize(prev.sizeBytes)} → ${formatSize(f.sizeBytes)})`
+          : '';
+        s.push(`  ~ ${f.relativePath}${sizeChange}`);
+      }
+    }
   }
   s.push('');
 
+  // Active file with full content
   if (current.activeFile) {
     s.push('## Active File');
     s.push(`Path: ${current.activeFile.relativePath}`);
@@ -100,12 +140,19 @@ export function compileIncremental(
     if (previous.activeFile && previous.activeFile.relativePath !== current.activeFile.relativePath) {
       s.push(`(Changed from: ${previous.activeFile.relativePath})`);
     }
+    if (current.activeFile.content) {
+      s.push('');
+      s.push('--- Content ---');
+      s.push(current.activeFile.content);
+      s.push('--- End Content ---');
+    }
     s.push('');
   }
 
+  // Full diagnostic messages
   if (current.diagnostics.length > 0) {
     s.push('## Current Diagnostics');
-    s.push(formatDiagnostics(current.diagnostics));
+    s.push(formatDiagnosticsWithMessages(current.diagnostics));
     s.push('');
   }
 
@@ -116,13 +163,15 @@ export function compileIncremental(
 }
 
 /**
- * Compiles a deep sync — full content of a single file.
+ * Compiles a deep sync — full content of a single file,
+ * or just the selected text if the user has a selection.
  */
 export function compileDeepSync(
   relativePath: string,
   languageId: string,
   lineCount: number,
-  content: string
+  content: string,
+  selectedText?: string
 ): string {
   const s: string[] = [];
 
@@ -131,10 +180,24 @@ export function compileDeepSync(
   s.push(`Language: ${languageId}`);
   s.push(`Lines: ${lineCount}`);
   s.push(`Synced at: ${new Date().toISOString()}`);
-  s.push('');
-  s.push('--- File Content ---');
-  s.push(content);
-  s.push('--- End File Content ---');
+
+  if (selectedText) {
+    // Selection mode: send only what the user highlighted
+    s.push(`Mode: selection`);
+    s.push('');
+    s.push('--- Selected Content ---');
+    s.push(selectedText);
+    s.push('--- End Selected Content ---');
+    s.push('');
+    s.push('(Full file content was not sent. Only the selected portion above.)');
+  } else {
+    // Full file mode
+    s.push('');
+    s.push('--- File Content ---');
+    s.push(content);
+    s.push('--- End File Content ---');
+  }
+
   s.push('');
   s.push(`=== End StateFlow Sync ===`);
 
@@ -143,10 +206,21 @@ export function compileDeepSync(
 
 // ─── Formatting Helpers ─────────────────────────────────────────────────────
 
-function formatFileList(files: FileEntry[]): string {
-  return files
-    .map(f => `  ${f.relativePath} (${f.languageId}, ${formatSize(f.sizeBytes)})`)
-    .join('\n');
+/**
+ * Formats file list with export signatures shown beneath each file.
+ */
+function formatFileListWithExports(files: FileEntry[]): string {
+  const lines: string[] = [];
+  for (const f of files) {
+    lines.push(`  ${f.relativePath} (${f.languageId}, ${formatSize(f.sizeBytes)})`);
+    // Show export signatures if available
+    if (f.exports && f.exports.length > 0) {
+      for (const exp of f.exports) {
+        lines.push(`    → ${exp}`);
+      }
+    }
+  }
+  return lines.join('\n');
 }
 
 function formatLanguageSummary(files: FileEntry[]): string {
@@ -160,13 +234,21 @@ function formatLanguageSummary(files: FileEntry[]): string {
     .join('\n');
 }
 
-function formatDiagnostics(diagnostics: DiagnosticEntry[]): string {
+/**
+ * Formats diagnostics with actual error/warning messages and line numbers.
+ * Example:
+ *   src/utils.ts:
+ *     Line 23 [error]: Property 'pool' does not exist on type 'Connection'
+ *     Line 45 [warning]: 'result' is declared but never used
+ */
+function formatDiagnosticsWithMessages(diagnostics: DiagnosticEntry[]): string {
   return diagnostics
     .map(d => {
-      const parts: string[] = [];
-      if (d.errors > 0) parts.push(`${d.errors} error${d.errors > 1 ? 's' : ''}`);
-      if (d.warnings > 0) parts.push(`${d.warnings} warning${d.warnings > 1 ? 's' : ''}`);
-      return `  ${d.relativePath}: ${parts.join(', ')}`;
+      const header = `  ${d.relativePath}: ${d.errors} error${d.errors !== 1 ? 's' : ''}, ${d.warnings} warning${d.warnings !== 1 ? 's' : ''}`;
+      const details = d.details
+        .map(det => `    Line ${det.line} [${det.severity}]: ${det.message}`)
+        .join('\n');
+      return `${header}\n${details}`;
     })
     .join('\n');
 }
