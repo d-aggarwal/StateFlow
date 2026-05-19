@@ -1,25 +1,14 @@
 import * as vscode from 'vscode';
 import { SyncState } from './syncState';
-import { getWorkspaceSnapshot, getActiveFileInfo } from './repoAnalyzer';
-import { compilePrimer, compileIncremental, compileDeepSync } from './contextCompiler';
+import { getWorkspaceSnapshot, getErrorAtCursor, getActiveFileInfo } from './repoAnalyzer';
+import { compilePrimer, compileIncremental, compileErrorContext } from './contextCompiler';
 import { copyToClipboard } from './clipboardSink';
-
-/**
- * Extension entry point.
- *
- * Registers two commands:
- *   1. stateflow.syncRepo    — Project primer (first) or incremental update (subsequent)
- *   2. stateflow.deepSync    — Full content of the active file (or selection)
- *
- * All state is in-memory via SyncState. No persistence, no background work.
- */
 
 let syncState: SyncState;
 
 export function activate(context: vscode.ExtensionContext) {
   syncState = new SyncState();
 
-  // ── Command 1: Sync Repo → Chat ──────────────────────────────────────────
   const syncRepoCmd = vscode.commands.registerCommand('stateflow.syncRepo', async () => {
     try {
       const snapshot = await getWorkspaceSnapshot();
@@ -47,35 +36,33 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  // ── Command 2: Deep Sync Current File → Chat ────────────────────────────
-  // Sends full file content, or just the selected text if user has a selection.
-  const deepSyncCmd = vscode.commands.registerCommand('stateflow.deepSync', async () => {
+  const errorContextCmd = vscode.commands.registerCommand('stateflow.errorContext', async () => {
     try {
-      const fileInfo = getActiveFileInfo(true);
+      const ctx = getErrorAtCursor();
 
-      if (!fileInfo) {
-        vscode.window.showWarningMessage('StateFlow: No active file to deep sync.');
+      if (!ctx) {
+        const activeFile = getActiveFileInfo(false);
+        const fileName = activeFile ? `"${activeFile.relativePath}"` : 'the current file';
+        vscode.window.showInformationMessage(
+          `StateFlow: No errors or warnings found in ${fileName}. 🎉`
+        );
         return;
       }
 
-      if (!fileInfo.content) {
-        vscode.window.showWarningMessage('StateFlow: Could not read file content.');
-        return;
-      }
+      const userQuestion = await vscode.window.showInputBox({
+        title: 'StateFlow: What do you want to ask the browser LLM?',
+        prompt: `Error found: "${ctx.error.message}" — what's your question?`,
+        value: 'Why is this happening and how do I fix it?',
+        ignoreFocusOut: true,
+      });
 
-      const output = compileDeepSync(
-        fileInfo.relativePath,
-        fileInfo.languageId,
-        fileInfo.lineCount,
-        fileInfo.content,
-        fileInfo.selectedText  // undefined if no selection → sends full file
-      );
+      ctx.userQuestion = userQuestion;
 
+      const output = compileErrorContext(ctx);
       await copyToClipboard(output);
 
-      const what = fileInfo.selectedText ? 'selection' : `${fileInfo.lineCount} lines`;
       vscode.window.showInformationMessage(
-        `StateFlow: Deep sync of "${fileInfo.relativePath}" copied to clipboard (${what}).`
+        `StateFlow: Error context copied to clipboard (line ${ctx.errorLine}: ${ctx.error.severity}).`
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -83,7 +70,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  context.subscriptions.push(syncRepoCmd, deepSyncCmd);
+  context.subscriptions.push(syncRepoCmd, errorContextCmd);
 }
 
 export function deactivate() {

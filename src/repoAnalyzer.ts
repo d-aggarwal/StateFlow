@@ -1,12 +1,6 @@
 import * as vscode from 'vscode';
-import { FileEntry, ActiveFileInfo, DiagnosticEntry, DiagnosticDetail, KeyFile, WorkspaceSnapshot } from './types';
+import { FileEntry, ActiveFileInfo, DiagnosticEntry, DiagnosticDetail, ErrorContext, KeyFile, WorkspaceSnapshot } from './types';
 
-/**
- * ContextSource: Reads workspace state using VS Code APIs.
- *
- * This module is the only place that touches VS Code workspace/editor APIs
- * for data gathering. Everything it produces is a plain data object (no VS Code types leak out).
- */
 
 /** Files/folders excluded from workspace scanning. */
 const EXCLUDE_PATTERN = '{**/node_modules/**,**/.git/**,**/out/**,**/dist/**,**/.next/**,**/build/**,**/.vscode/**,**/*.map}';
@@ -26,12 +20,7 @@ const EXPORT_SCAN_MAX_FILES = 100;
 /** Key files to include content of in the primer (checked in order). */
 const KEY_FILE_NAMES = ['package.json', 'README.md', 'readme.md'];
 
-/**
- * Scans the workspace and produces a complete snapshot.
- *
- * Uses vscode.workspace.findFiles() which respects the user's files.exclude setting
- * and our additional EXCLUDE_PATTERN.
- */
+
 export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -40,7 +29,6 @@ export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
 
   const workspaceName = workspaceFolders[0].name;
 
-  // findFiles(include, exclude, maxResults) — returns matching file URIs
   const fileUris = await vscode.workspace.findFiles('**/*', EXCLUDE_PATTERN, MAX_FILES);
 
   const files: FileEntry[] = [];
@@ -59,7 +47,6 @@ export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
     }
   }
 
-  // Alphabetical sort for deterministic output
   files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 
   // Scan export signatures for code files (TS/JS only)
@@ -71,7 +58,7 @@ export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   return {
     workspaceName,
     files,
-    activeFile: getActiveFileInfo(true), // include content for primer/incremental
+    activeFile: getActiveFileInfo(true),
     diagnostics: getDiagnosticsSummary(),
     keyFiles,
     timestamp: new Date().toISOString(),
@@ -108,12 +95,7 @@ export function getActiveFileInfo(includeContent: boolean): ActiveFileInfo | nul
   return info;
 }
 
-/**
- * Summarizes all workspace diagnostics (errors + warnings) per file.
- * Now includes the actual diagnostic messages, not just counts.
- *
- * vscode.languages.getDiagnostics() returns Array<[Uri, Diagnostic[]]>.
- */
+
 export function getDiagnosticsSummary(): DiagnosticEntry[] {
   const allDiagnostics = vscode.languages.getDiagnostics();
   const entries: DiagnosticEntry[] = [];
@@ -158,12 +140,78 @@ export function getDiagnosticsSummary(): DiagnosticEntry[] {
   return entries;
 }
 
-// ─── Key File Reading ─────────────────────────────────────────────────────
 
-/**
- * Reads the content of key project files (package.json, README.md).
- * These give the browser LLM project identity — what this project IS.
- */
+const SURROUNDING_LINE_COUNT = 20;
+
+
+export function getErrorAtCursor(): ErrorContext | null {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return null;
+
+  const doc = editor.document;
+  const cursorLine = editor.selection.active.line; // 0-indexed
+  const relativePath = vscode.workspace.asRelativePath(doc.uri, false);
+
+  
+  const fileDiagnostics = vscode.languages.getDiagnostics(doc.uri);
+  if (fileDiagnostics.length === 0) return null;
+
+  
+  const relevant = fileDiagnostics
+    .filter(d =>
+      d.severity === vscode.DiagnosticSeverity.Error ||
+      d.severity === vscode.DiagnosticSeverity.Warning
+    )
+    .sort((a, b) => {
+      const distA = Math.abs(a.range.start.line - cursorLine);
+      const distB = Math.abs(b.range.start.line - cursorLine);
+      return distA - distB; 
+    });
+
+  if (relevant.length === 0) return null;
+
+  
+  const primary = relevant[0];
+  const errorLine = primary.range.start.line + 1; // 1-indexed for output
+
+  const primaryDetail: DiagnosticDetail = {
+    line: errorLine,
+    severity: primary.severity === vscode.DiagnosticSeverity.Error ? 'error' : 'warning',
+    message: primary.message,
+  };
+
+  // All other diagnostics in this file (for context awareness)
+  const otherDiagnostics: DiagnosticDetail[] = relevant.slice(1).map(d => ({
+    line: d.range.start.line + 1,
+    severity: d.severity === vscode.DiagnosticSeverity.Error ? 'error' : 'warning',
+    message: d.message,
+  }));
+
+
+  const sourceLines = doc.getText().split('\n');
+  const errorLineIdx = primary.range.start.line; // 0-indexed
+  const fromIdx = Math.max(0, errorLineIdx - SURROUNDING_LINE_COUNT);
+  const toIdx = Math.min(sourceLines.length - 1, errorLineIdx + SURROUNDING_LINE_COUNT);
+
+  const surroundingLines = [];
+  for (let i = fromIdx; i <= toIdx; i++) {
+    surroundingLines.push({
+      lineNumber: i + 1, // 1-indexed
+      content: sourceLines[i],
+    });
+  }
+
+  return {
+    relativePath,
+    languageId: doc.languageId,
+    error: primaryDetail,
+    otherDiagnostics,
+    surroundingLines,
+    errorLine,
+  };
+}
+
+
 async function readKeyFiles(): Promise<KeyFile[]> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders) return [];
@@ -190,13 +238,8 @@ async function readKeyFiles(): Promise<KeyFile[]> {
   return keyFiles;
 }
 
-// ─── Export Signature Scanning ──────────────────────────────────────────────
+// ─── Export Signature Scanning 
 
-/**
- * Scans code files for export signatures (TS/JS only for now).
- * This is deterministic — just regex matching lines starting with `export`.
- * Gives the browser LLM each file's API surface without the full implementation.
- */
 async function scanExports(files: FileEntry[]): Promise<void> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders) return;
@@ -223,10 +266,7 @@ async function scanExports(files: FileEntry[]): Promise<void> {
   }
 }
 
-/**
- * Extracts export signatures from file content.
- * Looks for lines starting with `export` and cleans them up.
- */
+
 function extractExportSignatures(content: string): string[] {
   return content
     .split('\n')
@@ -249,10 +289,6 @@ function extractExportSignatures(content: string): string[] {
 
 // ─── Language Detection ─────────────────────────────────────────────────────
 
-/**
- * Maps file extension → language identifier.
- * Intentionally simple — covers common cases, falls back to the extension itself.
- */
 function guessLanguage(filePath: string): string {
   const ext = filePath.split('.').pop()?.toLowerCase() || '';
   const map: Record<string, string> = {

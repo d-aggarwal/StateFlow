@@ -17,9 +17,10 @@
         "command": "stateflow.syncRepo",
         "title": "StateFlow: Sync Repo → Chat"
       },
+
       {
-        "command": "stateflow.deepSync",
-        "title": "StateFlow: Deep Sync Current File → Chat"
+        "command": "stateflow.errorContext",
+        "title": "StateFlow: Error Context → Chat"
       }
     ]
   },

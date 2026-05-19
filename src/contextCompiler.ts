@@ -1,22 +1,6 @@
-import { WorkspaceSnapshot, FileEntry, DiagnosticEntry, KeyFile } from './types';
+import { WorkspaceSnapshot, FileEntry, DiagnosticEntry, ErrorContext, KeyFile } from './types';
 
-/**
- * ContextNormalizer: Compiles workspace data into human-readable text blocks
- * suitable for pasting into any chat-based LLM.
- *
- * Output format is plain text with markdown-style headers.
- * Designed to be readable by both humans and LLMs.
- */
 
-// ─── Public API ─────────────────────────────────────────────────────────────
-
-/**
- * Compiles a full project primer (used on first sync).
- * Gives the receiving LLM a high-level understanding of the project.
- *
- * Includes: key file contents, file tree with exports, active file content,
- * and full diagnostic messages.
- */
 export function compilePrimer(snapshot: WorkspaceSnapshot): string {
   const s: string[] = [];
 
@@ -72,11 +56,7 @@ export function compilePrimer(snapshot: WorkspaceSnapshot): string {
   return s.join('\n');
 }
 
-/**
- * Compiles an incremental update (used on subsequent syncs).
- * Shows what changed since the last sync: added, removed, and modified files.
- * Includes active file content and full diagnostic messages.
- */
+
 export function compileIncremental(
   current: WorkspaceSnapshot,
   previous: WorkspaceSnapshot
@@ -162,53 +142,53 @@ export function compileIncremental(
   return s.join('\n');
 }
 
-/**
- * Compiles a deep sync — full content of a single file,
- * or just the selected text if the user has a selection.
- */
-export function compileDeepSync(
-  relativePath: string,
-  languageId: string,
-  lineCount: number,
-  content: string,
-  selectedText?: string
-): string {
+
+
+export function compileErrorContext(ctx: ErrorContext): string {
   const s: string[] = [];
 
-  s.push(`=== StateFlow: Deep Sync ===`);
-  s.push(`File: ${relativePath}`);
-  s.push(`Language: ${languageId}`);
-  s.push(`Lines: ${lineCount}`);
+  s.push(`=== StateFlow: Error Context Sync ===`);
+  s.push(`File: ${ctx.relativePath}`);
+  s.push(`Language: ${ctx.languageId}`);
   s.push(`Synced at: ${new Date().toISOString()}`);
+  s.push('');
 
-  if (selectedText) {
-    // Selection mode: send only what the user highlighted
-    s.push(`Mode: selection`);
+  // User's question first — gives the browser LLM clear intent
+  if (ctx.userQuestion) {
+    s.push('## My Question');
+    s.push(ctx.userQuestion);
     s.push('');
-    s.push('--- Selected Content ---');
-    s.push(selectedText);
-    s.push('--- End Selected Content ---');
-    s.push('');
-    s.push('(Full file content was not sent. Only the selected portion above.)');
-  } else {
-    // Full file mode
-    s.push('');
-    s.push('--- File Content ---');
-    s.push(content);
-    s.push('--- End File Content ---');
   }
 
+  // The specific error at the cursor
+  s.push('## Error');
+  s.push(`  Line ${ctx.error.line} [${ctx.error.severity}]: ${ctx.error.message}`);
   s.push('');
-  s.push(`=== End StateFlow Sync ===`);
 
+  // Surrounding source code with a ► marker on the error line
+  s.push(`## Code Context (around line ${ctx.errorLine})`);
+  for (const { lineNumber, content } of ctx.surroundingLines) {
+    const marker = lineNumber === ctx.errorLine ? '►' : ' ';
+    // Pad line numbers so columns align
+    const lineNum = String(lineNumber).padStart(4, ' ');
+    s.push(`${marker} ${lineNum} | ${content}`);
+  }
+  s.push('');
+
+  // Other diagnostics in the same file — useful but not the focus
+  if (ctx.otherDiagnostics.length > 0) {
+    s.push('## Other Diagnostics in This File');
+    for (const d of ctx.otherDiagnostics) {
+      s.push(`  Line ${d.line} [${d.severity}]: ${d.message}`);
+    }
+    s.push('');
+  }
+
+  s.push(`=== End StateFlow Sync ===`);
   return s.join('\n');
 }
 
-// ─── Formatting Helpers ─────────────────────────────────────────────────────
 
-/**
- * Formats file list with export signatures shown beneath each file.
- */
 function formatFileListWithExports(files: FileEntry[]): string {
   const lines: string[] = [];
   for (const f of files) {
@@ -234,13 +214,7 @@ function formatLanguageSummary(files: FileEntry[]): string {
     .join('\n');
 }
 
-/**
- * Formats diagnostics with actual error/warning messages and line numbers.
- * Example:
- *   src/utils.ts:
- *     Line 23 [error]: Property 'pool' does not exist on type 'Connection'
- *     Line 45 [warning]: 'result' is declared but never used
- */
+
 function formatDiagnosticsWithMessages(diagnostics: DiagnosticEntry[]): string {
   return diagnostics
     .map(d => {
