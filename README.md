@@ -15,11 +15,11 @@ StateFlow acts as a transparent context transport layer. It deterministically an
 
 StateFlow provides two targeted commands via the Command Palette:
 
-1. **`StateFlow: Sync Repo → Chat`**
+1. **StateFlow: Sync Repo → Chat**
    - **First Run:** Copies a "Project Primer" (workspace identity, file tree with TS/JS exports, active file contents, and current diagnostics).
    - **Subsequent Runs:** Copies an "Incremental Update" containing only file modifications since the last sync.
 
-2. **`StateFlow: Error Context → Chat`**
+2. **StateFlow: Error Context → Chat**
    - Locates the active compiler error nearest your cursor.
    - Prompts for an optional question (default: *"Why is this happening and how do I fix it?"*).
    - Copies the specific error message, your question, and ±20 lines of surrounding code to your clipboard for highly focused debugging.
